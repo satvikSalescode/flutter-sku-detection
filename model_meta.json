@@ -1,0 +1,7 @@
+{
+  "num_classes": 1,
+  "class_names": [
+    "object"
+  ],
+  "input_size": 640
+}

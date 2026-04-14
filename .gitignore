@@ -1,0 +1,58 @@
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+*.iml
+
+# Pub
+.pub-cache/
+.pub/
+pubspec.lock
+
+# Android
+android/.gradle/
+android/local.properties
+android/key.properties
+android/app/debug.keystore
+*.jks
+*.keystore
+
+# iOS
+ios/.symlinks/
+ios/Pods/
+ios/Podfile.lock
+ios/Flutter/Generated.xcconfig
+ios/Flutter/flutter_export_environment.sh
+*.xcworkspace/xcuserdata/
+
+# macOS
+macos/Flutter/GeneratedPluginRegistrant.swift
+macos/Pods/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python / model tooling
+venv/
+venv311/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Large binary model files (use Git LFS or store separately)
+*.onnx
+*.onnx.data
+*.npy
+
+# Catalog JSON is a project asset — track it
+!assets/catalog_embeddings.json
