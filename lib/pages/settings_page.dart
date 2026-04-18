@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../services/settings_service.dart';
 import '../services/vision_pipeline.dart';
 import 'catalog_page.dart';
+import 'debug_screen.dart';
 
 class SettingsPage extends StatefulWidget {
   final VisionPipeline pipeline;
@@ -94,6 +95,12 @@ class _SettingsPageState extends State<SettingsPage> {
             value:    _s.showDebug,
             onChanged: (v) => setState(() => _s.showDebug = v),
           ),
+          _navTile(
+            icon:     Icons.bug_report_outlined,
+            label:    'Debug / Verification',
+            subtitle: 'Model info · self-test · pipeline test · catalog health',
+            onTap:    _openDebugScreen,
+          ),
         ],
       ),
     );
@@ -101,11 +108,17 @@ class _SettingsPageState extends State<SettingsPage> {
 
   // ── Navigation ────────────────────────────────────────────────────────────
 
+  void _openDebugScreen() {
+    Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => DebugScreen(pipeline: widget.pipeline),
+    ));
+  }
+
   void _openCatalog() {
     Navigator.of(context).push(MaterialPageRoute(
       builder: (_) => CatalogPage(
         catalogService: widget.pipeline.catalogService,
-        dinov2Service:  widget.pipeline.dinov2Service,
+        dinov3Service:  widget.pipeline.dinov3Service,
       ),
     ));
   }

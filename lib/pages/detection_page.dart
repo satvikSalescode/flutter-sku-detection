@@ -10,7 +10,7 @@ import 'analysis_results_page.dart';
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 class DetectionPage extends StatefulWidget {
-  /// Fully initialised pipeline (YOLO + DINOv2 + catalog loaded).
+  /// Fully initialised pipeline (YOLO + DINOv3 + catalog loaded).
   final VisionPipeline pipeline;
 
   const DetectionPage({super.key, required this.pipeline});
@@ -66,7 +66,7 @@ class _DetectionPageState extends State<DetectionPage> {
       // Show sequential step labels so the user knows what's happening.
       // The pipeline itself decides timing; we update the label on a short delay.
       _updateStepLabel('Running YOLO detection…', 0);
-      _updateStepLabel('Generating DINOv2 embeddings…', 600);
+      _updateStepLabel('Generating DINOv3 embeddings…', 600);
       _updateStepLabel('Matching against catalog…', 1400);
 
       final analysis = await widget.pipeline.analyzeShelf(decoded);
@@ -166,7 +166,7 @@ class _DetectionPageState extends State<DetectionPage> {
                   fontSize:   16,
                   fontWeight: FontWeight.w600)),
           const SizedBox(height: 6),
-          const Text('YOLO · DINOv2 · On-device',
+          const Text('YOLO · DINOv3 · On-device',
               style: TextStyle(color: Colors.white38, fontSize: 12)),
         ],
       ),

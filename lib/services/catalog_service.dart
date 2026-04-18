@@ -77,7 +77,7 @@ class MatchResult {
 
 // ── Service ────────────────────────────────────────────────────────────────────
 
-/// Loads, persists, and serves the DINOv2 catalog.
+/// Loads, persists, and serves the DINOv3 catalog.
 ///
 /// Load priority:
 ///   1. Local documents directory  (updated via [updateProductEmbedding] or
@@ -108,8 +108,7 @@ class CatalogService {
 
   // ── Thresholds ──────────────────────────────────────────────────────────────
 
-  double scoreThreshold  = 0.60;
-  double marginThreshold = 0.05;
+  double scoreThreshold  = 0.65;
 
   // ── State ───────────────────────────────────────────────────────────────────
 
@@ -320,7 +319,7 @@ class CatalogService {
     final best        = ranked[0];
     final secondScore = ranked.length > 1 ? ranked[1].value : best.value;
     final margin      = best.value - secondScore;
-    final matched     = best.value >= scoreThreshold && margin >= marginThreshold;
+    final matched     = best.value >= scoreThreshold;
 
     return MatchResult(
       productName: best.key,
@@ -375,7 +374,7 @@ class CatalogService {
       final best        = ranked[0];
       final secondScore = ranked.length > 1 ? ranked[1].value : best.value;
       final margin      = best.value - secondScore;
-      final matched     = best.value >= scoreThreshold && margin >= marginThreshold;
+      final matched     = best.value >= scoreThreshold;
 
       results.add(MatchResult(
         productName: best.key,
@@ -445,7 +444,7 @@ class CatalogService {
       };
     }
     return {
-      'model':          catalogModel.isEmpty ? 'dinov2-small' : catalogModel,
+      'model':          catalogModel.isEmpty ? 'dinov3-small' : catalogModel,
       'embedding_dim':  embeddingDim,
       'version':        catalogVersion.isEmpty
           ? DateTime.now().toIso8601String()

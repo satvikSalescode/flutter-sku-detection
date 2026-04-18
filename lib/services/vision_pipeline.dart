@@ -7,7 +7,7 @@ import 'package:image/image.dart' as img;
 import '../models/detection_result.dart';
 import '../utils/crop_filter.dart';
 import 'catalog_service.dart';
-import 'dinov2_service.dart';
+import 'dinov3_service.dart';
 import 'inference_service.dart';
 
 // ── Result models ─────────────────────────────────────────────────────────────
@@ -65,7 +65,7 @@ class DetectedProduct {
       'avg=${avgSimilarity.toStringAsFixed(3)})';
 }
 
-/// A crop that did not match any catalog product (below score/margin threshold).
+/// A crop that did not match any catalog product (below score threshold).
 class UnknownDetection {
   /// Bounding box (image-pixel coords) of the unmatched crop.
   final Rect boundingBox;
@@ -131,12 +131,12 @@ class ShelfAnalysis {
 
 // ── Pipeline ──────────────────────────────────────────────────────────────────
 
-/// Orchestrates the full YOLO → DINOv2 → catalog-matching pipeline.
+/// Orchestrates the full YOLO → DINOv3 → catalog-matching pipeline.
 ///
 /// Typical lifecycle:
 ///   final pipeline = VisionPipeline(
 ///     yoloService:    inferenceService,
-///     dinov2Service:  dinoV2Service,
+///     dinov3Service:  dinoV3Service,
 ///     catalogService: catalogService,
 ///   );
 ///   await pipeline.initialize();
@@ -144,20 +144,20 @@ class ShelfAnalysis {
 ///
 /// [initialize] must complete before [analyzeShelf] is called.
 /// The pipeline does not own the injected services — do not call
-/// [DinoV2Service.dispose] from [initialize].
+/// [DinoV3Service.dispose] from [initialize].
 class VisionPipeline {
   /// YOLO object-detection service (must already be initialised).
   final InferenceService yoloService;
 
-  /// DINOv2 embedding service (initialised by [initialize]).
-  final DinoV2Service dinov2Service;
+  /// DINOv3 embedding service (initialised by [initialize]).
+  final DinoV3Service dinov3Service;
 
   /// Catalog matching service (loaded by [initialize]).
   final CatalogService catalogService;
 
   VisionPipeline({
     required this.yoloService,
-    required this.dinov2Service,
+    required this.dinov3Service,
     required this.catalogService,
   });
 
@@ -168,7 +168,7 @@ class VisionPipeline {
 
   // ── Init ─────────────────────────────────────────────────────────────────────
 
-  /// Loads the DINOv2 model, loads the catalog JSON, then runs a self-test.
+  /// Loads the DINOv3 model, loads the catalog JSON, then runs a self-test.
   ///
   /// If the self-test fails it logs a warning but does NOT throw — inference
   /// may still work correctly. A self-test failure indicates either a
@@ -182,15 +182,15 @@ class VisionPipeline {
 
     debugPrint('[VisionPipeline] Initializing…');
 
-    await dinov2Service.initialize();
+    await dinov3Service.initialize();
     await catalogService.load();
 
-    final selfTestPassed = await dinov2Service.selfTest();
+    final selfTestPassed = await dinov3Service.selfTest();
     if (!selfTestPassed) {
       debugPrint(
           '[VisionPipeline] ⚠️  Self-test warning — model loaded but '
           'self-test did not pass. Continuing anyway; real-image accuracy '
-          'may be affected. Check dinov2_service.dart preprocessing if '
+          'may be affected. Check dinov3_service.dart preprocessing if '
           'matching results look wrong.');
     }
 
@@ -210,8 +210,8 @@ class VisionPipeline {
   /// Steps executed in order:
   ///   1. YOLO detection
   ///   2. Confidence / size / NMS filtering + crop extraction
-  ///   3. DINOv2 batch embedding
-  ///   4. Catalog matching (cosine similarity + dual-threshold)
+  ///   3. DINOv3 batch embedding
+  ///   4. Catalog matching (cosine similarity + single score threshold)
   ///   5. Result aggregation (facings count, shelf share)
   Future<ShelfAnalysis> analyzeShelf(img.Image shelfImage) async {
     _assertReady();
@@ -231,7 +231,7 @@ class VisionPipeline {
     // ── Step 2: Filter + extract crops ────────────────────────────────────────
     //
     // Drop low-confidence, tiny, and overlapping boxes; then cut each surviving
-    // box from the original [shelfImage] as an img.Image for DINOv2.
+    // box from the original [shelfImage] as an img.Image for DINOv3.
     final sw2 = Stopwatch()..start();
 
     final filter = const CropFilter(
@@ -269,11 +269,11 @@ class VisionPipeline {
       );
     }
 
-    // ── Step 3: DINOv2 embeddings ─────────────────────────────────────────────
+    // ── Step 3: DINOv3 embeddings ─────────────────────────────────────────────
     //
-    // Inference is internally batched in chunks of 16 by DinoV2Service.
+    // Inference is internally batched in chunks of 16 by DinoV3Service.
     final sw3 = Stopwatch()..start();
-    final embeddings = await dinov2Service.getEmbeddings(crops);
+    final embeddings = await dinov3Service.getEmbeddings(crops);
     final embeddingMs = sw3.elapsedMilliseconds;
     debugPrint('[VisionPipeline] Step 3: Generated ${embeddings.length} embeddings '
         'in ${embeddingMs}ms');
@@ -281,7 +281,7 @@ class VisionPipeline {
     // ── Step 4: Catalog matching ──────────────────────────────────────────────
     //
     // matchCrops runs a [numCrops × numFlatEmbeddings] matrix multiply then
-    // applies per-product max + dual-threshold (score ≥ 0.60, margin ≥ 0.05).
+    // applies per-product max + single score threshold (score ≥ 0.65).
     final sw4 = Stopwatch()..start();
     final matchResults  = catalogService.matchCrops(embeddings);
     final matchedCount  = matchResults.where((r) => r.isMatched).length;
@@ -319,7 +319,7 @@ class VisionPipeline {
   ///
   /// The round-trip (encode → detect → delete) is necessary because
   /// [InferenceService.detect] accepts a [File].  Quality 92 JPEG preserves
-  /// enough detail for bounding-box detection; DINOv2 crops are extracted
+  /// enough detail for bounding-box detection; DINOv3 crops are extracted
   /// from the original in-memory [img.Image] (Step 2), not from this file.
   Future<List<DetectionResult>> _runYolo(img.Image shelfImage) async {
     File? tempFile;

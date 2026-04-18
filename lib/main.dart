@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import 'pages/detection_page.dart';
 import 'pages/settings_page.dart';
 import 'services/catalog_service.dart';
-import 'services/dinov2_service.dart';
+import 'services/dinov3_service.dart';
 import 'services/inference_service.dart';
 import 'services/settings_service.dart';
 import 'services/vision_pipeline.dart';
@@ -45,7 +45,7 @@ class _InitScreenState extends State<_InitScreen> {
 
   // Services — created once and held for the lifetime of the app.
   final _yolo    = InferenceService();
-  final _dino    = DinoV2Service();
+  final _dino    = DinoV3Service();
   final _catalog = CatalogService();
   late  VisionPipeline _pipeline;
 
@@ -57,7 +57,7 @@ class _InitScreenState extends State<_InitScreen> {
     super.initState();
     _pipeline = VisionPipeline(
       yoloService:    _yolo,
-      dinov2Service:  _dino,
+      dinov3Service:  _dino,
       catalogService: _catalog,
     );
     WidgetsBinding.instance.addPostFrameCallback((_) => _init());
@@ -73,10 +73,10 @@ class _InitScreenState extends State<_InitScreen> {
       _setStatus('Loading settings…');
       await SettingsService.init();
 
-      // Step 3 ─ DINOv2 + catalog + self-test
+      // Step 3 ─ DINOv3 + catalog + self-test
       // VisionPipeline.initialize() handles all three sub-steps internally:
       //   dino.initialize() → catalog.load() → dino.selfTest()
-      _setStatus('Loading DINOv2 + catalog…\n(first launch may take ~5 s)');
+      _setStatus('Loading DINOv3 + catalog…\n(first launch may take ~5 s)');
       await _pipeline.initialize();
 
       if (!mounted) return;
@@ -129,7 +129,7 @@ class _InitScreenState extends State<_InitScreen> {
                       fontSize:   24,
                       fontWeight: FontWeight.bold)),
               const SizedBox(height: 6),
-              const Text('YOLO · DINOv2 · On-device',
+              const Text('YOLO · DINOv3 · On-device',
                   style: TextStyle(color: Colors.white38, fontSize: 12)),
 
               const SizedBox(height: 40),
@@ -187,7 +187,7 @@ class _HomePageState extends State<HomePage> {
   @override
   void dispose() {
     widget.yolo.dispose();
-    widget.pipeline.dinov2Service.dispose();
+    widget.pipeline.dinov3Service.dispose();
     super.dispose();
   }
 

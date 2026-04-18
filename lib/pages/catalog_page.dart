@@ -5,7 +5,7 @@ import 'package:image/image.dart' as img;
 import 'package:image_picker/image_picker.dart';
 
 import '../services/catalog_service.dart';
-import '../services/dinov2_service.dart';
+import '../services/dinov3_service.dart';
 
 // ── Palette ───────────────────────────────────────────────────────────────────
 
@@ -23,12 +23,12 @@ const _kGrey   = Color(0xFF252540);
 /// Shows catalog metadata, product list, and provides URL sync.
 class CatalogPage extends StatefulWidget {
   final CatalogService  catalogService;
-  final DinoV2Service   dinov2Service;
+  final DinoV3Service   dinov3Service;
 
   const CatalogPage({
     super.key,
     required this.catalogService,
-    required this.dinov2Service,
+    required this.dinov3Service,
   });
 
   @override
@@ -217,7 +217,7 @@ class _CatalogPageState extends State<CatalogPage> {
       builder: (_) => ProductDetailPage(
         product:        product,
         catalogService: widget.catalogService,
-        dinov2Service:  widget.dinov2Service,
+        dinov3Service:  widget.dinov3Service,
       ),
     ));
     // Refresh list after returning (user may have added embeddings)
@@ -430,13 +430,13 @@ class _ProductListTile extends StatelessWidget {
 class ProductDetailPage extends StatefulWidget {
   final ProductReference product;
   final CatalogService   catalogService;
-  final DinoV2Service    dinov2Service;
+  final DinoV3Service    dinov3Service;
 
   const ProductDetailPage({
     super.key,
     required this.product,
     required this.catalogService,
-    required this.dinov2Service,
+    required this.dinov3Service,
   });
 
   @override
@@ -477,9 +477,9 @@ class _ProductDetailPageState extends State<ProductDetailPage> {
       final decoded = img.decodeImage(bytes);
       if (decoded == null) throw Exception('Cannot decode image');
 
-      // 3. Generate DINOv2 embedding
+      // 3. Generate DINOv3 embedding
       _showStatus('Generating embedding…');
-      final embedding = await widget.dinov2Service.getEmbedding(decoded);
+      final embedding = await widget.dinov3Service.getEmbedding(decoded);
 
       // 4. Save to catalog
       _showStatus('Saving…');
@@ -596,7 +596,7 @@ class _ProductDetailPageState extends State<ProductDetailPage> {
                 Expanded(
                   child: Text(
                     'Tap an empty slot to capture a reference photo. '
-                    'A DINOv2 embedding is generated on-device and saved locally.',
+                    'A DINOv3 embedding is generated on-device and saved locally.',
                     style: TextStyle(
                         color: _kTeal, fontSize: 11, height: 1.4),
                   ),

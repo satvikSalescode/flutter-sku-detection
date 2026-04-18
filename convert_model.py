@@ -69,7 +69,7 @@ def main():
     parser = argparse.ArgumentParser(description="Export YOLOv8 .pt → ONNX opset 19")
     parser.add_argument(
         "--model",
-        default="/Users/satvikchaudhary/Desktop/IRED DOCS/All_Epochs/best.pt",
+        default="/Users/satvikchaudhary/Desktop/IRED DOCS/All_Epochs/epoch80_stripped.pt",
     )
     parser.add_argument("--imgsz", type=int, default=640)
     args = parser.parse_args()

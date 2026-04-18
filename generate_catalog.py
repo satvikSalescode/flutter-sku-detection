@@ -2,15 +2,19 @@
 generate_catalog.py
 ───────────────────
 Generates a catalog_embeddings.json from a folder of reference product images
-using DINOv2-small embeddings. The output JSON is loaded by the Flutter app
-for on-device SKU matching.
+using DINOv3-small (facebook/dinov3-vits16-pretrain-lvd1689m) embeddings.
+The output JSON is loaded by the Flutter app for on-device SKU matching.
+
+⚠️  IMPORTANT: This catalog is ONLY compatible with the DINOv3 ONNX model
+    (dinov3_small.onnx). Do NOT use a DINOv2-generated catalog with DINOv3
+    or vice versa — the embedding spaces are different and matching will fail.
 
 Usage:
-    # PyTorch (requires transformers + torch)
-    python generate_catalog.py --catalog reference_images/
+    # PyTorch backend (requires transformers + torch + HF token for gated repo)
+    python generate_catalog.py --catalog reference_images/ --token hf_xxx
 
-    # ONNX (faster, no PyTorch needed at runtime)
-    python generate_catalog.py --catalog reference_images/ --model onnx --onnx-path dinov2_small.onnx
+    # ONNX backend (faster, no transformers needed; use the exported ONNX)
+    python generate_catalog.py --catalog reference_images/ --model onnx --onnx-path dinov3_small.onnx
 
     # Custom output path
     python generate_catalog.py --catalog reference_images/ --output assets/catalog_embeddings.json
@@ -23,6 +27,12 @@ Input folder layout:
     │   └── ...
     └── Sprite_Can_Green/
         └── front.jpg
+
+DINOv3 vs DINOv2 differences handled here:
+    • Model ID : facebook/dinov3-vits16-pretrain-lvd1689m  (gated repo — needs token)
+    • Output   : pooler_output [batch, 384]  instead of last_hidden_state[:, 0, :]
+    • Context  : torch.inference_mode()      instead of torch.no_grad()
+    • ONNX out : out[0, :]                   instead of out[0, 0, :]  (2D not 3D)
 """
 
 import argparse
@@ -48,9 +58,10 @@ from PIL import Image
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
+MODEL_ID    = "facebook/dinov3-vits16-pretrain-lvd1689m"
 RESIZE_TO   = 256          # shortest edge before center crop
-CROP_SIZE   = 224          # final square crop fed to DINOv2
-EMB_DIM     = 384          # DINOv2-small CLS token dimension
+CROP_SIZE   = 224          # final square crop fed to DINOv3
+EMB_DIM     = 384          # DINOv3-small pooler_output dimension
 MEAN        = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 STD         = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 IMG_EXTS    = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
@@ -60,7 +71,7 @@ IMG_EXTS    = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 def preprocess(img_path: str) -> np.ndarray:
     """
     Loads an image and returns a float32 NCHW tensor [1, 3, 224, 224]
-    matching DINOv2's expected preprocessing exactly.
+    matching DINOv3's expected preprocessing exactly (identical to DINOv2).
 
     Pipeline:
         1. Open as RGB
@@ -93,24 +104,30 @@ def preprocess(img_path: str) -> np.ndarray:
 # ── Embedder — PyTorch ────────────────────────────────────────────────────────
 
 class PyTorchEmbedder:
-    def __init__(self):
-        print("  Loading DINOv2-small from HuggingFace (cached after first run)…")
+    def __init__(self, token: str | None = None):
+        print(f"  Loading DINOv3-small from HuggingFace (cached after first run)…")
+        print(f"  Model: {MODEL_ID}")
         torch        = _require("torch")
-        transformers = _require("transformers")
+        _            = _require("transformers")
         from transformers import AutoModel
 
         self.torch = torch
-        self.model = AutoModel.from_pretrained("facebook/dinov2-small")
+        hf_kwargs  = {"token": token} if token else {}
+        self.model = AutoModel.from_pretrained(MODEL_ID, **hf_kwargs)
         self.model.eval()
-        print(f"  ✅  PyTorch model ready  ({EMB_DIM}-dim embeddings)")
+        print(f"  ✅  PyTorch DINOv3 model ready  ({EMB_DIM}-dim embeddings)")
 
     def embed(self, tensor: np.ndarray) -> np.ndarray:
-        """tensor: [1, 3, 224, 224] float32 ndarray → [384] L2-normed ndarray"""
+        """tensor: [1, 3, 224, 224] float32 ndarray → [384] L2-normed ndarray
+
+        DINOv3 uses pooler_output [1, 384] — no CLS-token slicing needed.
+        Uses torch.inference_mode() (preferred over no_grad for inference).
+        """
         t = self.torch.from_numpy(tensor)
-        with self.torch.no_grad():
-            out = self.model(pixel_values=t).last_hidden_state  # [1, 257, 384]
-        cls = out[0, 0, :].numpy()                               # [384]
-        return cls / np.linalg.norm(cls)
+        with self.torch.inference_mode():
+            out = self.model(pixel_values=t).pooler_output  # [1, 384]
+        emb = out[0].numpy()                                 # [384]
+        return emb / np.linalg.norm(emb)
 
 # ── Embedder — ONNX ───────────────────────────────────────────────────────────
 
@@ -120,26 +137,45 @@ class ONNXEmbedder:
 
         if not os.path.exists(onnx_path):
             print(f"[ERROR] ONNX model not found: {onnx_path}")
-            print("        Run  python export_dinov2.py  first.")
+            print("        Run  python export_dinov3.py  first.")
             sys.exit(1)
 
         size_mb = os.path.getsize(onnx_path) / (1024 * 1024)
         if size_mb < 10:
             print(f"[ERROR] {onnx_path} is only {size_mb:.1f} MB — weights appear missing.")
-            print("        Re-export with  python export_dinov2.py  (requires dynamo=False).")
+            print("        Re-export with  python export_dinov3.py")
             sys.exit(1)
 
         opts = ort.SessionOptions()
         opts.log_severity_level = 3
         self.sess     = ort.InferenceSession(onnx_path, sess_options=opts)
         self.inp_name = self.sess.get_inputs()[0].name
-        print(f"  ✅  ONNX model ready  ({onnx_path}, {size_mb:.0f} MB, {EMB_DIM}-dim)")
+
+        # Detect output shape to confirm this is the DINOv3 wrapper
+        # (DINOv3 outputs [batch, 384] — 2D; DINOv2 outputs [batch, seq, 384] — 3D)
+        out_shape = self.sess.get_outputs()[0].shape
+        self.is_2d = len(out_shape) == 2
+        shape_desc = f"[batch, {EMB_DIM}] pooler_output" if self.is_2d \
+                     else f"[batch, seq, {EMB_DIM}] hidden_states"
+        print(f"  ✅  ONNX model ready  ({onnx_path}, {size_mb:.0f} MB)")
+        print(f"       Output: {shape_desc}")
+        if not self.is_2d:
+            print("  ⚠️  Warning: output looks like DINOv2 (3D) — expected DINOv3 (2D).")
+            print("       Make sure you are using dinov3_small.onnx, not dinov2_small.onnx.")
 
     def embed(self, tensor: np.ndarray) -> np.ndarray:
-        """tensor: [1, 3, 224, 224] float32 ndarray → [384] L2-normed ndarray"""
-        out = self.sess.run(None, {self.inp_name: tensor})[0]  # [1, 257, 384]
-        cls = out[0, 0, :]                                      # [384]
-        return cls / np.linalg.norm(cls)
+        """tensor: [1, 3, 224, 224] float32 ndarray → [384] L2-normed ndarray
+
+        DINOv3 ONNX wrapper outputs pooler_output as [1, 384] (2D).
+        DINOv2 outputs last_hidden_state as [1, seq_len, 384] (3D) with CLS at [0].
+        This embedder handles both but logs a warning for the DINOv2 case.
+        """
+        out = self.sess.run(None, {self.inp_name: tensor})[0]
+        if self.is_2d:
+            emb = out[0, :]      # [384]  — DINOv3 pooler_output
+        else:
+            emb = out[0, 0, :]   # [384]  — DINOv2 CLS token (fallback)
+        return emb / np.linalg.norm(emb)
 
 # ── Image discovery ───────────────────────────────────────────────────────────
 
@@ -179,19 +215,24 @@ def discover_products(catalog_dir: str) -> dict[str, list[str]]:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate DINOv2 catalog embeddings from reference product images.")
+        description="Generate DINOv3 catalog embeddings from reference product images.")
     parser.add_argument("--catalog",   required=True,
                         help="Path to reference_images/ folder")
     parser.add_argument("--output",    default="catalog_embeddings.json",
                         help="Output JSON path (default: catalog_embeddings.json)")
     parser.add_argument("--model",     choices=["pytorch", "onnx"], default="pytorch",
                         help="Embedding backend (default: pytorch)")
-    parser.add_argument("--onnx-path", default="dinov2_small.onnx",
-                        help="Path to dinov2_small.onnx (required when --model onnx)")
+    parser.add_argument("--onnx-path", default="dinov3_small.onnx",
+                        help="Path to dinov3_small.onnx (required when --model onnx)")
+    parser.add_argument("--token",     default=None,
+                        help="HuggingFace access token (hf_...) for the gated DINOv3 repo")
     args = parser.parse_args()
 
+    # Accept token from env var too
+    token = args.token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+
     print("=" * 60)
-    print("  DINOv2 Catalog Generator")
+    print("  DINOv3 Catalog Generator")
     print("=" * 60)
 
     # ── Load embedder ─────────────────────────────────────────────────────────
@@ -199,7 +240,7 @@ def main():
     if args.model == "onnx":
         embedder = ONNXEmbedder(args.onnx_path)
     else:
-        embedder = PyTorchEmbedder()
+        embedder = PyTorchEmbedder(token=token)
 
     # ── Discover products ─────────────────────────────────────────────────────
     print(f"\nScanning: {args.catalog}")
@@ -246,7 +287,7 @@ def main():
     # ── Build JSON ────────────────────────────────────────────────────────────
     num_embeddings = sum(len(v["angles"]) for v in catalog_products.values())
     output_data = {
-        "model":          "dinov2-small",
+        "model":          "dinov3-small",
         "embedding_dim":  EMB_DIM,
         "version":        datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "num_products":   len(catalog_products),
@@ -261,26 +302,29 @@ def main():
 
     # ── Self-test ─────────────────────────────────────────────────────────────
     print("\n" + "─" * 60)
-    print("SELF-TEST: Each product's first image should match its own")
-    print("           other angles best (intra-product > inter-product)")
+    print("SELF-TEST RESULTS:")
+    print("Each product's first angle must match its OWN other angles better")
+    print("than any other product.  (intra-product cosine > inter-product)")
     print("─" * 60)
 
-    all_pass    = True
-    warned_once = False
+    all_pass      = True
+    warned_once   = False
+    best_intra_overall = -1.0   # track global max intra-product score
+    best_inter_overall = -1.0   # track global max inter-product score
 
     for product_name, data in catalog_products.items():
         embs   = [np.array(e) for e in data["embeddings"]]
         angles = data["angles"]
 
         if len(embs) < 2:
-            print(f"  {product_name}: only 1 image — skipping self-test "
+            print(f"  {product_name}: only 1 image — skipping "
                   f"(add more angles for a meaningful test)")
             continue
 
         query     = embs[0]
         query_ang = angles[0]
 
-        # Cosine similarity of query vs every OTHER embedding in catalog
+        # Cosine similarity of query vs every OTHER embedding in the full catalog
         best_score   = -1.0
         best_product = ""
         best_angle   = ""
@@ -288,11 +332,10 @@ def main():
         for other_prod, other_data in catalog_products.items():
             other_embs   = [np.array(e) for e in other_data["embeddings"]]
             other_angles = other_data["angles"]
-            for i, (oemb, oang) in enumerate(zip(other_embs, other_angles)):
-                # Skip comparing the query with itself
+            for oemb, oang in zip(other_embs, other_angles):
                 if other_prod == product_name and oang == query_ang:
-                    continue
-                score = float(np.dot(query, oemb))   # both L2-normed → dot = cosine
+                    continue                               # skip self
+                score = float(np.dot(query, oemb))        # cosine (both L2-normed)
                 if score > best_score:
                     best_score   = score
                     best_product = other_prod
@@ -301,11 +344,14 @@ def main():
         ok = best_product == product_name
         if not ok:
             all_pass = False
+            best_inter_overall = max(best_inter_overall, best_score)
+        else:
+            best_intra_overall = max(best_intra_overall, best_score)
 
-        mark = "✅" if ok else "❌ WARNING"
-        print(f"  {product_name} [{query_ang}]")
-        print(f"    → best match: {best_product} [{best_angle}]  "
-              f"(score={best_score:.4f})  {mark}")
+        mark = "✅" if ok else "❌"
+        print(f"  {product_name} {query_ang} → "
+              f"best match: {best_product} {best_angle} "
+              f"({best_score:.2f}) {mark}")
 
         if not ok and not warned_once:
             warned_once = True
@@ -327,13 +373,17 @@ def main():
     file_kb = out_path.stat().st_size / 1024
     print()
     print("=" * 60)
-    print("  Catalog generated")
+    print("  DINOv3 Catalog generated ✅")
     print("=" * 60)
+    print(f"  Model           : {MODEL_ID}")
     print(f"  Products        : {len(catalog_products)}")
     print(f"  Total embeddings: {num_embeddings}")
     print(f"  Embedding dim   : {EMB_DIM}")
     print(f"  File size       : {file_kb:.0f} KB")
     print(f"  Saved to        : {out_path}")
+    print()
+    print("  ⚠️  This catalog is ONLY compatible with dinov3_small.onnx")
+    print("     Do NOT mix with a DINOv2-generated catalog.")
     print()
     print("  Next step:")
     print(f"    cp {out_path} assets/catalog_embeddings.json")
