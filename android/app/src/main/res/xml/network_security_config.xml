@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Allows plain HTTP only for local development addresses.
+  10.0.2.2   = Android emulator → host machine localhost
+  localhost  = physical device after `adb reverse tcp:8000 tcp:8000`
+  10.0.0.0/8 = common LAN ranges (if you use the Mac's Wi-Fi IP directly)
+
+  Production traffic (api.salescode.ai) uses HTTPS and is unaffected.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">10.0.2.2</domain>
+        <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="true">local</domain>
+    </domain-config>
+    <!-- All other domains: cleartext blocked, HTTPS only (production default) -->
+    <base-config cleartextTrafficPermitted="false" />
+</network-security-config>

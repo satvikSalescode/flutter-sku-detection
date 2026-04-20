@@ -4,8 +4,10 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' show Rect;
 import 'package:image/image.dart' as img;
 
+import '../config/vision_config.dart';
 import '../models/detection_result.dart';
 import '../utils/crop_filter.dart';
+import 'backend_api_client.dart';
 import 'catalog_service.dart';
 import 'dinov3_service.dart';
 import 'inference_service.dart';
@@ -49,7 +51,14 @@ class DetectedProduct {
   final List<Rect> boundingBoxes;
 
   /// Crop thumbnails for every facing, in the same order as [boundingBoxes].
+  /// Empty when the result came from the backend (no local crops available).
   final List<img.Image> cropImages;
+
+  /// OCR text extracted by the backend for this product, or null if unavailable.
+  final String? ocrText;
+
+  /// How the match was determined, e.g. "visual + ocr". Null for on-device results.
+  final String? matchMethod;
 
   const DetectedProduct({
     required this.productName,
@@ -57,6 +66,8 @@ class DetectedProduct {
     required this.avgSimilarity,
     required this.boundingBoxes,
     required this.cropImages,
+    this.ocrText,
+    this.matchMethod,
   });
 
   @override
@@ -80,11 +91,15 @@ class UnknownDetection {
   /// Will be "Unknown" when the catalog is empty or the embedding is invalid.
   final String nearestProduct;
 
+  /// OCR text extracted by the backend for this unknown crop, or null.
+  final String? ocrText;
+
   const UnknownDetection({
     required this.boundingBox,
     required this.cropImage,
     required this.bestScore,
     required this.nearestProduct,
+    this.ocrText,
   });
 }
 
@@ -168,37 +183,58 @@ class VisionPipeline {
 
   // ── Init ─────────────────────────────────────────────────────────────────────
 
-  /// Loads the DINOv3 model, loads the catalog JSON, then runs a self-test.
+  /// Initialises the pipeline based on [VisionConfig.onDevice].
   ///
-  /// If the self-test fails it logs a warning but does NOT throw — inference
-  /// may still work correctly. A self-test failure indicates either a
-  /// non-fatal preprocessing quirk on this device or an out-of-distribution
-  /// synthetic test image. Hard failures (model not loading, ONNX crash) will
-  /// have already thrown before reaching the self-test.
+  /// On-device mode: loads DINOv3 model + catalog, runs self-test.
+  /// Backend mode:   skips DINOv3 and catalog entirely (~40 MB saved);
+  ///                 pings the backend health endpoint as an early warning.
+  ///
+  /// Neither a self-test failure nor a failed health check is fatal here —
+  /// both log a warning so the app can still launch. Hard failures (ONNX
+  /// crash, missing asset) throw before reaching these checks.
   ///
   /// Calling [initialize] more than once is a no-op.
   Future<void> initialize() async {
     if (_isInitialized) return;
 
-    debugPrint('[VisionPipeline] Initializing…');
+    final mode = VisionConfig.onDevice ? 'on-device' : 'backend';
+    debugPrint('[VisionPipeline] Initializing ($mode mode)…');
 
-    await dinov3Service.initialize();
-    await catalogService.load();
+    if (VisionConfig.onDevice) {
+      // ── On-device: load DINOv3 + catalog, run self-test ──────────────────
+      await dinov3Service.initialize();
+      await catalogService.load();
 
-    final selfTestPassed = await dinov3Service.selfTest();
-    if (!selfTestPassed) {
+      final selfTestPassed = await dinov3Service.selfTest();
+      if (!selfTestPassed) {
+        debugPrint(
+            '[VisionPipeline] ⚠️  Self-test warning — model loaded but '
+            'self-test did not pass. Continuing anyway; real-image accuracy '
+            'may be affected. Check dinov3_service.dart preprocessing if '
+            'matching results look wrong.');
+      }
+
+      _isInitialized = true;
       debugPrint(
-          '[VisionPipeline] ⚠️  Self-test warning — model loaded but '
-          'self-test did not pass. Continuing anyway; real-image accuracy '
-          'may be affected. Check dinov3_service.dart preprocessing if '
-          'matching results look wrong.');
-    }
+          '[VisionPipeline] ✅  Ready (on-device)  '
+          '(${catalogService.products.length} products, '
+          '${catalogService.numAngles} reference vectors)');
+    } else {
+      // ── Backend: skip DINOv3 + catalog; verify API connectivity ──────────
+      final client    = BackendApiClient(baseUrl: VisionConfig.backendBaseUrl);
+      final reachable = await client.checkHealth();
+      if (!reachable) {
+        debugPrint(
+            '[VisionPipeline] ⚠️  Backend health check failed — '
+            '${VisionConfig.backendBaseUrl} may be unreachable. '
+            'analyzeShelf calls will fail until the API is available.');
+      }
 
-    _isInitialized = true;
-    debugPrint(
-        '[VisionPipeline] ✅  Ready  '
-        '(${catalogService.products.length} products, '
-        '${catalogService.numAngles} reference vectors)');
+      _isInitialized = true;
+      debugPrint(
+          '[VisionPipeline] ✅  Ready (backend mode)  '
+          'API: ${VisionConfig.backendBaseUrl}');
+    }
   }
 
   // ── Main entry point ─────────────────────────────────────────────────────────
@@ -207,12 +243,10 @@ class VisionPipeline {
   /// [ShelfAnalysis] containing matched products, unmatched crops, facing
   /// counts, shelf-share percentage, and per-step timing.
   ///
-  /// Steps executed in order:
-  ///   1. YOLO detection
-  ///   2. Confidence / size / NMS filtering + crop extraction
-  ///   3. DINOv3 batch embedding
-  ///   4. Catalog matching (cosine similarity + single score threshold)
-  ///   5. Result aggregation (facings count, shelf share)
+  /// Steps 1–2 (YOLO + filtering) always run on-device.
+  /// Steps 3–5 run on-device or via the backend API depending on
+  /// [VisionConfig.onDevice].  The returned [ShelfAnalysis] is identical
+  /// in structure regardless of which path was taken.
   Future<ShelfAnalysis> analyzeShelf(img.Image shelfImage) async {
     _assertReady();
 
@@ -220,18 +254,18 @@ class VisionPipeline {
 
     // ── Step 1: YOLO detection ────────────────────────────────────────────────
     //
-    // InferenceService.detect() accepts a File, so we encode [shelfImage] to a
-    // temporary JPEG, run detection, then delete the temp file.
+    // Always runs on-device.  InferenceService.detect() accepts a File, so we
+    // encode [shelfImage] to a temporary JPEG, run detection, then delete it.
     final sw1 = Stopwatch()..start();
     final rawDetections = await _runYolo(shelfImage);
     final yoloMs = sw1.elapsedMilliseconds;
     debugPrint('[VisionPipeline] Step 1: YOLO detected '
         '${rawDetections.length} products in ${yoloMs}ms');
 
-    // ── Step 2: Filter + extract crops ────────────────────────────────────────
+    // ── Step 2: Filter ────────────────────────────────────────────────────────
     //
-    // Drop low-confidence, tiny, and overlapping boxes; then cut each surviving
-    // box from the original [shelfImage] as an img.Image for DINOv3.
+    // Drop low-confidence, tiny, and overlapping boxes.
+    // Crops are only extracted in on-device mode (Step 3 below).
     final sw2 = Stopwatch()..start();
 
     final filter = const CropFilter(
@@ -241,17 +275,15 @@ class VisionPipeline {
     );
     final filtered = filter.filter(rawDetections);
     final removed  = rawDetections.length - filtered.length;
-    final crops    = _extractCrops(shelfImage, filtered);
 
     final filterMs = sw2.elapsedMilliseconds;
     debugPrint('[VisionPipeline] Step 2: ${filtered.length} crops after filtering '
         '(removed $removed) in ${filterMs}ms');
 
-    // Early-exit when nothing survives the filter.
+    // Early-exit when nothing survives the filter (same for both modes).
     if (filtered.isEmpty) {
       totalSw.stop();
-      debugPrint('[VisionPipeline] Step 5: Analysis complete — '
-          '0 matched, 0 unknown, 0.0% shelf share');
+      debugPrint('[VisionPipeline] Early exit — 0 detections after filter');
       return ShelfAnalysis(
         totalDetections:   0,
         matchedCount:      0,
@@ -269,48 +301,110 @@ class VisionPipeline {
       );
     }
 
-    // ── Step 3: DINOv3 embeddings ─────────────────────────────────────────────
-    //
-    // Inference is internally batched in chunks of 16 by DinoV3Service.
-    final sw3 = Stopwatch()..start();
-    final embeddings = await dinov3Service.getEmbeddings(crops);
-    final embeddingMs = sw3.elapsedMilliseconds;
-    debugPrint('[VisionPipeline] Step 3: Generated ${embeddings.length} embeddings '
-        'in ${embeddingMs}ms');
+    // ── Steps 3–5: On-device or backend ───────────────────────────────────────
 
-    // ── Step 4: Catalog matching ──────────────────────────────────────────────
-    //
-    // matchCrops runs a [numCrops × numFlatEmbeddings] matrix multiply then
-    // applies per-product max + single score threshold (score ≥ 0.65).
-    final sw4 = Stopwatch()..start();
-    final matchResults  = catalogService.matchCrops(embeddings);
-    final matchedCount  = matchResults.where((r) => r.isMatched).length;
-    final matchingMs    = sw4.elapsedMilliseconds;
-    debugPrint('[VisionPipeline] Step 4: Matched $matchedCount/${matchResults.length} '
-        'products in ${matchingMs}ms');
+    if (VisionConfig.onDevice) {
+      // ══ EXISTING ON-DEVICE FLOW — unchanged ══════════════════════════════
 
-    // ── Step 5: Aggregate results ─────────────────────────────────────────────
-    totalSw.stop();
-    final analysis = _aggregate(
-      detections:   filtered,
-      crops:        crops,
-      matchResults: matchResults,
-      timing: PipelineTiming(
-        yoloMs:      yoloMs,
-        filterMs:    filterMs,
-        embeddingMs: embeddingMs,
-        matchingMs:  matchingMs,
-        totalMs:     totalSw.elapsedMilliseconds,
-      ),
-    );
+      // Step 3: Extract crops from the in-memory image, then embed with DINOv3.
+      final crops = _extractCrops(shelfImage, filtered);
 
-    debugPrint(
-        '[VisionPipeline] Step 5: Analysis complete — '
-        '${analysis.matchedCount} matched, '
-        '${analysis.unknownCount} unknown, '
-        '${analysis.shelfSharePercent.toStringAsFixed(1)}% shelf share');
+      final sw3 = Stopwatch()..start();
+      final embeddings = await dinov3Service.getEmbeddings(crops);
+      final embeddingMs = sw3.elapsedMilliseconds;
+      debugPrint('[VisionPipeline] Step 3: Generated ${embeddings.length} '
+          'embeddings in ${embeddingMs}ms');
 
-    return analysis;
+      // Step 4: Catalog matching.
+      final sw4 = Stopwatch()..start();
+      final matchResults = catalogService.matchCrops(embeddings);
+      final matchedCount = matchResults.where((r) => r.isMatched).length;
+      final matchingMs   = sw4.elapsedMilliseconds;
+      debugPrint('[VisionPipeline] Step 4: Matched '
+          '$matchedCount/${matchResults.length} products in ${matchingMs}ms');
+
+      // Step 5: Aggregate.
+      totalSw.stop();
+      final analysis = _aggregate(
+        detections:   filtered,
+        crops:        crops,
+        matchResults: matchResults,
+        timing: PipelineTiming(
+          yoloMs:      yoloMs,
+          filterMs:    filterMs,
+          embeddingMs: embeddingMs,
+          matchingMs:  matchingMs,
+          totalMs:     totalSw.elapsedMilliseconds,
+        ),
+      );
+
+      debugPrint(
+          '[VisionPipeline] Complete (on-device) — '
+          '${analysis.matchedCount} matched, '
+          '${analysis.unknownCount} unknown, '
+          '${analysis.shelfSharePercent.toStringAsFixed(1)}% shelf share  '
+          '${analysis.timing.totalMs}ms');
+
+      return analysis;
+
+    } else {
+      // ══ BACKEND FLOW ═════════════════════════════════════════════════════
+      //
+      // Send the image + YOLO detections to the backend API.
+      // DINOv3 and CatalogService are NOT used here — they were not loaded.
+
+      File? tempFile;
+      try {
+        tempFile = await _writeTempJpeg(shelfImage);
+
+        final client = BackendApiClient(baseUrl: VisionConfig.backendBaseUrl);
+        final yoloDetections = filtered
+            .map(YoloDetection.fromDetectionResult)
+            .toList();
+
+        final backendAnalysis = await client.analyzeShelf(
+          imageFile:       tempFile,
+          detections:      yoloDetections,
+          imageWidth:      shelfImage.width,
+          imageHeight:     shelfImage.height,
+          enableOcr:       VisionConfig.enableOcr,
+          scoreThreshold:  VisionConfig.scoreThreshold,
+          marginThreshold: VisionConfig.marginThreshold,
+        );
+
+        totalSw.stop();
+
+        // Patch timing: replace the placeholder yoloMs/filterMs (0) that the
+        // client set with the actual on-device measurements from Steps 1–2.
+        final analysis = ShelfAnalysis(
+          totalDetections:   backendAnalysis.totalDetections,
+          matchedCount:      backendAnalysis.matchedCount,
+          unknownCount:      backendAnalysis.unknownCount,
+          shelfSharePercent: backendAnalysis.shelfSharePercent,
+          products:          backendAnalysis.products,
+          unknowns:          backendAnalysis.unknowns,
+          timing: PipelineTiming(
+            yoloMs:      yoloMs,
+            filterMs:    filterMs,
+            embeddingMs: backendAnalysis.timing.embeddingMs, // server-side time
+            matchingMs:  backendAnalysis.timing.matchingMs,
+            totalMs:     totalSw.elapsedMilliseconds,
+          ),
+        );
+
+        debugPrint(
+            '[VisionPipeline] Complete (backend) — '
+            '${analysis.matchedCount} matched, '
+            '${analysis.unknownCount} unknown, '
+            '${analysis.shelfSharePercent.toStringAsFixed(1)}% shelf share  '
+            '${analysis.timing.totalMs}ms');
+
+        return analysis;
+
+      } finally {
+        try { await tempFile?.delete(); } catch (_) {}
+      }
+    }
   }
 
   // ── Private helpers ───────────────────────────────────────────────────────────
@@ -336,6 +430,17 @@ class VisionPipeline {
         await tempFile?.delete();
       } catch (_) {}
     }
+  }
+
+  /// Writes [image] to a temporary JPEG file (quality 92) and returns the
+  /// [File].  The caller is responsible for deleting it after use.
+  /// Used in backend mode to produce a file for [BackendApiClient.analyzeShelf].
+  Future<File> _writeTempJpeg(img.Image image) async {
+    final jpegBytes = img.encodeJpg(image, quality: 92);
+    final stamp     = DateTime.now().microsecondsSinceEpoch;
+    final file      = File('${Directory.systemTemp.path}/vp_backend_$stamp.jpg');
+    await file.writeAsBytes(jpegBytes, flush: true);
+    return file;
   }
 
   /// Cuts one [img.Image] crop per entry in [detections] from [shelfImage].

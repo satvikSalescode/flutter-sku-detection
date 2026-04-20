@@ -36,4 +36,30 @@ class SettingsService {
 
   bool get showDebug => _prefs.getBool('show_debug') ?? false;
   set showDebug(bool v) => _prefs.setBool('show_debug', v);
+
+  // ── Pipeline mode ──────────────────────────────────────────────────────────
+
+  /// True = everything runs on-device (default).
+  /// False = YOLO on-device, matching delegated to backend API.
+  bool get onDevice => _prefs.getBool('on_device') ?? false;
+  set onDevice(bool v) => _prefs.setBool('on_device', v);
+
+  /// Default is http://localhost:8000 which works for:
+  ///   - Physical Android device after: adb reverse tcp:8000 tcp:8000
+  ///   - iOS Simulator (shares host network natively)
+  /// For Android emulator without adb reverse, use: http://10.0.2.2:8000
+  /// For production: https://api.salescode.ai
+  String get backendBaseUrl =>
+      _prefs.getString('backend_base_url') ?? 'http://localhost:8000';
+  set backendBaseUrl(String v) => _prefs.setString('backend_base_url', v);
+
+  bool get enableOcr => _prefs.getBool('enable_ocr') ?? false;
+  set enableOcr(bool v) => _prefs.setBool('enable_ocr', v);
+
+  // ── Catalog sync ───────────────────────────────────────────────────────────
+
+  /// Epoch milliseconds of the last successful catalog load/sync.
+  /// 0 = never synced.
+  int get catalogLastSyncMs => _prefs.getInt('catalog_last_sync_ms') ?? 0;
+  set catalogLastSyncMs(int v) => _prefs.setInt('catalog_last_sync_ms', v);
 }
